@@ -1,1 +1,166 @@
+name: Furry Companion - patched OpenToonz Headless (Windows x64)
 
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'OpenToonz_Headless_FCS_v0_7.diff'
+      - '.github/workflows/build-fcs-headless.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2025
+    timeout-minutes: 150
+    env:
+      QT_PATH: ${{ github.workspace }}\thirdparty\qt\5.15.2_wintab\msvc2019_64
+      BOOST_ROOT: C:\local\boost_1_87_0
+      OpenCV_DIR: C:\tools\opencv\build
+      OPENCV_VERSION: '4.13.0'
+      BOOST_VERSION: '1.87.0'
+      BOOST_TOOLSET: '14.3'
+      QT_ARCHIVE_URL: https://github.com/shun-iwasawa/qt5/releases/download/v5.15.2_wintab/Qt5.15.2_wintab.zip
+      THIRD_PARTY_URL: https://github.com/andeon/opentoonz-thirdparty-libs/releases/download/prebuilt-libs-v1/thirdparty-libs.zip
+
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v6
+        with:
+          lfs: false
+
+      - name: Check and apply FCS source patch
+        shell: pwsh
+        run: |
+          $patch = Join-Path $env:GITHUB_WORKSPACE 'OpenToonz_Headless_FCS_v0_7.diff'
+          if (!(Test-Path $patch)) {
+            throw "Missing OpenToonz_Headless_FCS_v0_7.diff in repository root. Upload the diff from the build kit first."
+          }
+          git apply --check $patch
+          if ($LASTEXITCODE -ne 0) { throw "Patch does not match this source revision; stopped before modifying or building source." }
+          git apply $patch
+          if ($LASTEXITCODE -ne 0) { throw "git apply failed." }
+          "Patch applied to commit $env:GITHUB_SHA" | Out-File -FilePath "$env:GITHUB_WORKSPACE\fcs-build-source.txt" -Encoding utf8
+
+      - name: Install OpenCV and Boost if not present
+        shell: pwsh
+        run: |
+          if (!(Test-Path 'C:\tools\opencv\build\x64\vc16\bin\opencv_world4130.dll')) {
+            choco install opencv --version=$env:OPENCV_VERSION --no-progress --yes --force
+            if ($LASTEXITCODE -ne 0) { throw 'OpenCV install failed.' }
+          }
+          if (!(Test-Path $env:BOOST_ROOT)) {
+            choco install boost-msvc-$env:BOOST_TOOLSET --version=$env:BOOST_VERSION --no-progress --yes --force
+            if ($LASTEXITCODE -ne 0) { throw 'Boost install failed.' }
+          }
+
+      - name: Download custom Qt 5.15.2 and prebuilt third-party libraries
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force 'thirdparty\qt' | Out-Null
+          Invoke-WebRequest -Uri $env:QT_ARCHIVE_URL -OutFile 'Qt5.15.2_wintab.zip'
+          & 7z x 'Qt5.15.2_wintab.zip' | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'Qt archive extraction failed.' }
+          Move-Item -Force 'Qt5.15.2_wintab\5.15.2_wintab' 'thirdparty\qt\5.15.2_wintab'
+          Invoke-WebRequest -Uri $env:THIRD_PARTY_URL -OutFile 'thirdparty-libs.zip'
+          & 7z x -y 'thirdparty-libs.zip' | Out-Null
+          if ($LASTEXITCODE -ne 0) { throw 'Prebuilt third-party library extraction failed.' }
+
+      - name: Prepare third-party headers
+        shell: pwsh
+        run: |
+          Copy-Item 'thirdparty\tiff-4.0.3\libtiff\tif_config.vc.h' 'thirdparty\tiff-4.0.3\libtiff\tif_config.h' -Force
+          Copy-Item 'thirdparty\tiff-4.0.3\libtiff\tiffconf.vc.h' 'thirdparty\tiff-4.0.3\libtiff\tiffconf.h' -Force
+          Copy-Item 'thirdparty\libpng-1.6.21\scripts\pnglibconf.h.prebuilt' 'thirdparty\libpng-1.6.21\pnglibconf.h' -Force
+
+      - name: Configure OpenToonz Headless
+        shell: pwsh
+        run: |
+          cmake -S 'toonz\sources' -B 'toonz\build' -G 'Visual Studio 17 2022' -A x64 `
+            "-DQT_PATH=$env:QT_PATH" `
+            "-DBOOST_ROOT=$env:BOOST_ROOT" `
+            "-DOpenCV_DIR=$env:OpenCV_DIR" `
+            -DWITH_WINTAB=Y
+          if ($LASTEXITCODE -ne 0) { throw 'CMake configuration failed; see the configure log above.' }
+
+      - name: Build only the headless engine
+        shell: pwsh
+        run: |
+          cmake --build 'toonz\build' --config RelWithDebInfo --target toonz_headless --parallel 2
+          if ($LASTEXITCODE -ne 0) { throw 'toonz_headless native build failed.' }
+          $exe = 'toonz\build\RelWithDebInfo\toonz_headless.exe'
+          if (!(Test-Path $exe)) { throw "Build reported success but executable was not found at $exe" }
+
+      - name: Assemble portable runtime and run smoke test
+        shell: pwsh
+        run: |
+          $src = Join-Path $env:GITHUB_WORKSPACE 'toonz\build\RelWithDebInfo'
+          $bundle = Join-Path $env:GITHUB_WORKSPACE 'artifact\FurryCompanion_OpenToonz_Headless_Windows_x64'
+          New-Item -ItemType Directory -Force $bundle | Out-Null
+          Copy-Item (Join-Path $src 'toonz_headless.exe') $bundle -Force
+          Get-ChildItem $src -Filter '*.dll' | ForEach-Object { Copy-Item $_.FullName $bundle -Force }
+          & "$env:QT_PATH\bin\windeployqt.exe" --release --compiler-runtime --no-translations (Join-Path $bundle 'toonz_headless.exe')
+          if ($LASTEXITCODE -ne 0) { throw 'windeployqt failed.' }
+          $extraDlls = @(
+            'thirdparty\glut\3.7.6\lib\glut64.dll',
+            'thirdparty\glew\glew-1.9.0\bin\64bit\glew32.dll',
+            'thirdparty\libmypaint\dist\64\libiconv-2.dll',
+            'thirdparty\libmypaint\dist\64\libintl-8.dll',
+            'thirdparty\libmypaint\dist\64\libjson-c-2.dll',
+            'thirdparty\libmypaint\dist\64\libmypaint-1-4-0.dll',
+            'C:\tools\opencv\build\x64\vc16\bin\opencv_world4130.dll'
+          )
+          foreach ($dll in $extraDlls) {
+            if (!(Test-Path $dll)) { throw "Required runtime DLL is missing: $dll" }
+            Copy-Item $dll $bundle -Force
+          }
+          Copy-Item 'stuff' (Join-Path $bundle 'portablestuff') -Recurse -Force
+          $env:TOONZROOT = Join-Path $bundle 'portablestuff'
+          $exe = Join-Path $bundle 'toonz_headless.exe'
+          @'
+          import json, os, subprocess, sys
+          exe = sys.argv[1]
+          requests = '\n'.join([
+              json.dumps({'jsonrpc':'2.0','id':1,'method':'ping','params':{}}),
+              json.dumps({'jsonrpc':'2.0','id':2,'method':'eval','params':{'code':'var s = new Scene(); print(typeof s.buildMeshAdvanced); var r = new PlasticRig(); print(typeof r.setVertexAngleLimits);'}}),
+              json.dumps({'jsonrpc':'2.0','id':3,'method':'quit','params':{}}),
+              ''
+          ])
+          p = subprocess.run([exe], input=requests, text=True, capture_output=True, timeout=90, env=os.environ.copy(), cwd=os.path.dirname(exe))
+          text = p.stdout + '\n' + p.stderr
+          print(text)
+          if p.returncode != 0: raise SystemExit('Headless executable returned non-zero exit code')
+          lines = [line for line in p.stdout.splitlines() if line.strip().startswith('{')]
+          data = []
+          for line in lines:
+              try: data.append(json.loads(line))
+              except Exception: pass
+          if not any(x.get('result') == 'pong' for x in data): raise SystemExit('Ping smoke test failed')
+          evals = [x.get('result', {}).get('output', '') for x in data if x.get('id') == 2 and isinstance(x.get('result'), dict)]
+          eval_text = '\n'.join(evals)
+          if 'function' not in eval_text: raise SystemExit('FCS API smoke test failed: patched methods are not exposed as functions')
+          print('FCS native smoke test PASSED')
+          '@ | Set-Content -Path 'smoke_test.py' -Encoding utf8
+          python smoke_test.py $exe
+          if ($LASTEXITCODE -ne 0) { throw 'Native smoke test failed; artifact will not be uploaded.' }
+          $manifest = [ordered]@{
+            name = 'Furry Companion OpenToonz Headless';
+            version = 'FCS-API-v0.7';
+            source_commit = $env:GITHUB_SHA;
+            build_configuration = 'RelWithDebInfo';
+            architecture = 'x64';
+            qt = '5.15.2_wintab';
+            smoke_test = 'passed';
+            built_utc = (Get-Date).ToUniversalTime().ToString('o')
+          }
+          $manifest | ConvertTo-Json | Set-Content (Join-Path $bundle 'BUILD_MANIFEST.json') -Encoding utf8
+          Get-FileHash (Join-Path $bundle 'toonz_headless.exe') -Algorithm SHA256 | Format-List | Out-String | Set-Content (Join-Path $bundle 'SHA256_EXE.txt')
+
+      - name: Upload verified native engine artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: FurryCompanion-OpenToonz-Headless-Windows-x64
+          path: artifact/FurryCompanion_OpenToonz_Headless_Windows_x64/
+          if-no-files-found: error
+          retention-days: 7 
