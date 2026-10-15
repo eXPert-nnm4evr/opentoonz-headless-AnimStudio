@@ -1,0 +1,401 @@
+--- a/HEADLESS_API.md
++++ b/HEADLESS_API.md
+@@ -1228,3 +1228,57 @@
+ - **Vector images**: Stage coordinates, center at (0,0), units ≈ pixels at 72 DPI
+ - **Raster canvas**: Pixel coordinates, origin at bottom-left corner
+ - **Rasterizer**: Maps stage coordinates to output resolution via camera/DPI settings
++
++---
++
++## Furry Companion extensions (FCS patch v0.7)
++
++The following methods are **not part of the unmodified upstream API**. They are added by the Furry Companion patch bundle. They expose selected Plastic mesh controls from the existing C++ engine; they do not implement a second deformer.
++
++### Scene.buildMeshAdvanced
++
++```javascript
++var meshLevel = scene.buildMeshAdvanced(
++    rasterImage,
++    "mesh_name",
++    targetEdgeLength,   // 2..256 pixels
++    margin,             // 0..128 pixels
++    maxVertices          // 0 means use the builder's default/unbounded target
++);
++```
++
++This is an overload-like additional method; the original `scene.buildMesh(image, name)` remains available and retains its defaults (`15` px edge length, margin `5`, no target vertex cap). The advanced method validates the arguments before calling the same native `MeshBuilder` used by Plastic.
++
++### Level.getMeshInfo / getMeshVertices
++
++```javascript
++var info = meshLevel.getMeshInfo(1);
++// { meshCount, meshes: [{index, vertexCount}, ...], coordinateSpace }
++
++var vertices = meshLevel.getMeshVertices(0, 1);
++// [{index, x, y, rigidity}, ...]
++```
++
++Coordinates are in centered mesh/stage space: origin at image center, positive X to the right, positive Y upward. `rigidity` is the native `RigidPoint.rigidity` value. The methods inspect the actual `TMeshImage`, not a Python approximation.
++
++### Level.setMeshRigidityAtPoint
++
++```javascript
++var changed = meshLevel.setMeshRigidityAtPoint(
++    meshIndex, frame, x, y, radius, rigidity
++);
++```
++
++This paints existing vertices inside a circular radius, then invalidates the native Plastic mesh cache. Valid rigidity range is `1..10000`; the familiar Plastic UI uses `1` for flexible and `10000` for rigid. The return value is the number of vertices changed, allowing the caller to detect a misplaced zone.
++
++### PlasticRig.setVertexAngleLimits
++
++```javascript
++rig.setVertexAngleLimits(vertexIndex, minDegrees, maxDegrees);
++```
++
++Sets the native skeleton vertex's minimum/maximum accepted angle deltas (degrees) and invalidates its compiled Plastic data. This allows Furry Companion to keep joints within an editable angular range. Values must be finite, increasing, and within `[-360, 360]`.
++
++### Compatibility and error behavior
++
++The capability probe in Furry Animation Studio deliberately rejects an unpatched `toonz_headless` binary rather than silently falling back to the old Python deformation engine. `buildMeshAdvanced`, the three mesh inspection/rigidity methods, and `setVertexAngleLimits` must all be present for the FCS native export path.
+
+--- a/toonz/sources/include/toonz/scriptbinding_level.h
++++ b/toonz/sources/include/toonz/scriptbinding_level.h
+@@ -50,6 +50,15 @@
+   Q_INVOKABLE QScriptValue setFrame(const QScriptValue &fid,
+                                     const QScriptValue &image);
+ 
++  // Native Plastic mesh inspection/rigidity painting. Coordinates are in the
++  // mesh's centered stage space (origin at image center, positive Y upward).
++  Q_INVOKABLE QScriptValue getMeshInfo(int frame);
++  Q_INVOKABLE QScriptValue getMeshVertices(int meshIndex, int frame);
++  Q_INVOKABLE QScriptValue setMeshRigidityAtPoint(int meshIndex, int frame,
++                                                  double x, double y,
++                                                  double radius,
++                                                  double rigidity);
++
+   // Level operations
+   Q_INVOKABLE QScriptValue getFrameIds();
+   Q_INVOKABLE QScriptValue load(const QScriptValue &fp);
+
+--- a/toonz/sources/include/toonz/scriptbinding_plasticrig.h
++++ b/toonz/sources/include/toonz/scriptbinding_plasticrig.h
+@@ -29,6 +29,10 @@
+   Q_INVOKABLE QScriptValue moveVertex(int vertexIdx, double x, double y);
+   Q_INVOKABLE QScriptValue removeVertex(int vertexIdx);
+   Q_INVOKABLE QScriptValue setVertexName(int vertexIdx, const QString &name);
++  // Angle limits are deltas in degrees, matching Plastic Tool's native fields.
++  Q_INVOKABLE QScriptValue setVertexAngleLimits(int vertexIdx,
++                                                double minAngle,
++                                                double maxAngle);
+ 
+   // Keyframing deformation
+   Q_INVOKABLE QScriptValue setVertexKeyframe(int vertexIdx, double frame,
+
+--- a/toonz/sources/include/toonz/scriptbinding_scene.h
++++ b/toonz/sources/include/toonz/scriptbinding_scene.h
+@@ -73,9 +73,15 @@
+   // Export
+   Q_INVOKABLE QScriptValue exportResources(const QString &destDir);
+ 
+-  // Mesh generation for plastic deformation
++  // Mesh generation for plastic deformation. Keep the two-argument API
++  // for compatibility and expose explicit quality controls for Animation Studio.
+   Q_INVOKABLE QScriptValue buildMesh(const QScriptValue &imageArg,
+                                      const QString &levelName);
++  Q_INVOKABLE QScriptValue buildMeshAdvanced(const QScriptValue &imageArg,
++                                             const QString &levelName,
++                                             double targetEdgeLength,
++                                             int margin,
++                                             int maxVertices);
+ 
+   // Motion path splines
+   Q_INVOKABLE QScriptValue createSpline(const QScriptValue &pointArray);
+
+--- a/toonz/sources/toonz_headless/CMakeLists.txt
++++ b/toonz/sources/toonz_headless/CMakeLists.txt
+@@ -11,8 +11,20 @@
+     toonzlib
+     image
+     sound
+-    -Wl,--no-as-needed
+-    tnzstdfx
+-    colorfx
+-    -Wl,--as-needed
+ )
++
++# The upstream headless target used GNU ld flags unconditionally. They are
++# invalid for Visual Studio/MSVC, which blocks building the Windows executable.
++if(UNIX AND NOT APPLE)
++    target_link_libraries(toonz_headless
++        -Wl,--no-as-needed
++        tnzstdfx
++        colorfx
++        -Wl,--as-needed
++    )
++else()
++    target_link_libraries(toonz_headless
++        tnzstdfx
++        colorfx
++    )
++endif()
+
+--- a/toonz/sources/toonz_headless/main.cpp
++++ b/toonz/sources/toonz_headless/main.cpp
+@@ -5,6 +5,8 @@
+ #include <QJsonObject>
+ #include <QJsonArray>
+ #include <QTimer>
++
++#include <cstdio>
+ 
+ #include "tsystem.h"
+ #include "tthread.h"
+
+--- a/toonz/sources/toonzlib/scriptbinding_level.cpp
++++ b/toonz/sources/toonzlib/scriptbinding_level.cpp
+@@ -23,6 +23,8 @@
+ #include "trop.h"
+ #include "trasterimage.h"
+ #include "ttoonzimage.h"
++#include "tmeshimage.h"
++#include "ext/plasticdeformerstorage.h"
+ #include "tvectorimage.h"
+ #include "tpalette.h"
+ #include "tofflinegl.h"
+@@ -35,6 +37,8 @@
+ #include <QScriptEngine>
+ #include <QRegularExpression>
+ #include <QColor>
++
++#include <cmath>
+ 
+ namespace TScriptBinding {
+ 
+@@ -455,6 +459,108 @@
+   return QScriptValue();
+ }
+ 
++QScriptValue Level::getMeshInfo(int frame) {
++  if (!m_sl || frame < 1) {
++    return context()->throwError("getMeshInfo requires a valid level and frame >= 1");
++  }
++  TFrameId fid(frame);
++  TImageP image = m_sl->getFrame(fid, false);
++  TMeshImage *meshImage = image ? dynamic_cast<TMeshImage *>(image.getPointer()) : nullptr;
++  if (!meshImage) {
++    return context()->throwError("Requested level frame is not a Plastic mesh image");
++  }
++
++  QScriptEngine *engine = context()->engine();
++  QScriptValue result = engine->newObject();
++  const auto &meshes = meshImage->meshes();
++  QScriptValue items = engine->newArray(static_cast<uint>(meshes.size()));
++  for (int i = 0; i < static_cast<int>(meshes.size()); ++i) {
++    QScriptValue item = engine->newObject();
++    item.setProperty("index", i);
++    item.setProperty("vertexCount", meshes[i]->verticesCount());
++    items.setProperty(i, item);
++  }
++  result.setProperty("meshCount", static_cast<int>(meshes.size()));
++  result.setProperty("meshes", items);
++  result.setProperty("coordinateSpace",
++                     engine->toScriptValue(QStringLiteral("centered-stage-y-up")));
++  return result;
++}
++
++QScriptValue Level::getMeshVertices(int meshIndex, int frame) {
++  if (!m_sl || frame < 1) {
++    return context()->throwError("getMeshVertices requires a valid level and frame >= 1");
++  }
++  TImageP image = m_sl->getFrame(TFrameId(frame), false);
++  TMeshImage *meshImage = image ? dynamic_cast<TMeshImage *>(image.getPointer()) : nullptr;
++  if (!meshImage) {
++    return context()->throwError("Requested level frame is not a Plastic mesh image");
++  }
++  const auto &meshes = meshImage->meshes();
++  if (meshIndex < 0 || meshIndex >= static_cast<int>(meshes.size())) {
++    return context()->throwError("Mesh index out of range");
++  }
++
++  const TTextureMesh &mesh = *meshes[meshIndex];
++  QScriptEngine *engine = context()->engine();
++  QScriptValue result = engine->newArray(static_cast<uint>(mesh.verticesCount()));
++  for (int i = 0; i < mesh.verticesCount(); ++i) {
++    const RigidPoint &p = mesh.vertex(i).P();
++    QScriptValue item = engine->newObject();
++    item.setProperty("index", i);
++    item.setProperty("x", p.x);
++    item.setProperty("y", p.y);
++    item.setProperty("rigidity", p.rigidity);
++    result.setProperty(i, item);
++  }
++  return result;
++}
++
++QScriptValue Level::setMeshRigidityAtPoint(int meshIndex, int frame,
++                                           double x, double y, double radius,
++                                           double rigidity) {
++  if (!m_sl || frame < 1) {
++    return context()->throwError("setMeshRigidityAtPoint requires a valid level and frame >= 1");
++  }
++  if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(radius) ||
++      !std::isfinite(rigidity) || radius <= 0.0 || rigidity < 1.0 || rigidity > 10000.0) {
++    return context()->throwError(
++        "Rigidity painting expects finite x/y, radius > 0, and rigidity in [1, 10000]");
++  }
++
++  const TFrameId fid(frame);
++  TImageP image = m_sl->getFrame(fid, false);
++  TMeshImage *meshImage = image ? dynamic_cast<TMeshImage *>(image.getPointer()) : nullptr;
++  if (!meshImage) {
++    return context()->throwError("Requested level frame is not a Plastic mesh image");
++  }
++  auto &meshes = meshImage->meshes();
++  if (meshIndex < 0 || meshIndex >= static_cast<int>(meshes.size())) {
++    return context()->throwError("Mesh index out of range");
++  }
++
++  TTextureMesh &mesh = *meshes[meshIndex];
++  const double radius2 = radius * radius;
++  int changed = 0;
++  for (int i = 0; i < mesh.verticesCount(); ++i) {
++    RigidPoint &p = mesh.vertex(i).P();
++    const double dx = p.x - x;
++    const double dy = p.y - y;
++    if (dx * dx + dy * dy <= radius2) {
++      p.rigidity = rigidity;
++      ++changed;
++    }
++  }
++
++  if (changed > 0) {
++    m_sl->setFrame(fid, image);
++    m_sl->setDirtyFlag(true);
++    PlasticDeformerStorage::instance()->invalidateMeshImage(
++        meshImage, PlasticDeformerStorage::MESH);
++  }
++  return QScriptValue(changed);
++}
++
+ QScriptValue Level::getFrameByIndex(const QScriptValue &indexArg) {
+   if (getFrameCount() == 0) {
+     return context()->throwError("An empty level has no frames");
+
+--- a/toonz/sources/toonzlib/scriptbinding_plasticrig.cpp
++++ b/toonz/sources/toonzlib/scriptbinding_plasticrig.cpp
+@@ -3,7 +3,10 @@
+ #include "toonz/scriptbinding_plasticrig.h"
+ #include "ext/plasticskeleton.h"
+ #include "ext/plasticskeletondeformation.h"
++#include "ext/plasticdeformerstorage.h"
+ #include "tdoublekeyframe.h"
++
++#include <cmath>
+ 
+ namespace TScriptBinding {
+ 
+@@ -55,6 +58,29 @@
+         tr("Vertex index %1 out of range").arg(vertexIdx));
+   }
+   m_skeleton->moveVertex(vertexIdx, TPointD(x, y));
++  return context()->thisObject();
++}
++
++QScriptValue PlasticRig::setVertexAngleLimits(int vertexIdx,
++                                                   double minAngle,
++                                                   double maxAngle) {
++  if (vertexIdx < 0 || vertexIdx >= getVertexCount()) {
++    return context()->throwError(
++        tr("Vertex index %1 out of range").arg(vertexIdx));
++  }
++  if (!std::isfinite(minAngle) || !std::isfinite(maxAngle) ||
++      minAngle >= maxAngle || minAngle < -360.0 || maxAngle > 360.0) {
++    return context()->throwError(
++        tr("Angle limits must be finite, increasing values in [-360, 360]"));
++  }
++
++  PlasticSkeletonVertex &vertex = m_skeleton->vertex(vertexIdx);
++  vertex.m_minAngle = minAngle;
++  vertex.m_maxAngle = maxAngle;
++  // Native Plastic caches the compiled handle data; invalidate it after
++  // changing limits so a later render cannot reuse stale deformation data.
++  PlasticDeformerStorage::instance()->invalidateSkeleton(
++      m_deformation, 0, PlasticDeformerStorage::ALL);
+   return context()->thisObject();
+ }
+ 
+
+--- a/toonz/sources/toonzlib/scriptbinding_scene.cpp
++++ b/toonz/sources/toonzlib/scriptbinding_scene.cpp
+@@ -34,6 +34,8 @@
+ #include "toonz/tstageobjectspline.h"
+ #include "tstroke.h"
+ 
++#include <cmath>
++
+ namespace TScriptBinding {
+ 
+ Scene::Scene() {
+@@ -123,6 +125,13 @@
+                              const QString &levelName) const {
+   if (levelName.isEmpty()) {
+     return context()->throwError(tr("Level name cannot be empty"));
++  }
++  if (!std::isfinite(targetEdgeLength) || targetEdgeLength < 2.0 ||
++      targetEdgeLength > 256.0 || margin < 0 || margin > 128 ||
++      maxVertices < 0 || maxVertices > 1000000) {
++    return context()->throwError(
++        tr("Invalid mesh options (edge length 2..256, margin 0..128, "
++           "max vertices 0..1000000)"));
+   }
+ 
+   int levelType = NO_XSHLEVEL;
+@@ -532,6 +541,13 @@
+ 
+ QScriptValue Scene::buildMesh(const QScriptValue &imageArg,
+                               const QString &levelName) {
++  return buildMeshAdvanced(imageArg, levelName, 15.0, 5, 0);
++}
++
++QScriptValue Scene::buildMeshAdvanced(const QScriptValue &imageArg,
++                                      const QString &levelName,
++                                      double targetEdgeLength, int margin,
++                                      int maxVertices) {
+   Image *img = qscriptvalue_cast<Image *>(imageArg);
+   if (!img || !img->getImg()) {
+     return context()->throwError(tr("Expected an Image argument"));
+@@ -556,6 +572,19 @@
+   if (dpix <= 0) dpix = 72.0;
+   if (dpiy <= 0) dpiy = 72.0;
+ 
++  if (!std::isfinite(targetEdgeLength) || targetEdgeLength < 2.0 ||
++      targetEdgeLength > 256.0) {
++    return context()->throwError(
++        tr("Mesh target edge length must be finite and in [2, 256] pixels"));
++  }
++  if (margin < 0 || margin > 128) {
++    return context()->throwError(tr("Mesh margin must be in [0, 128] pixels"));
++  }
++  if (maxVertices < 0 || maxVertices > 1000000) {
++    return context()->throwError(
++        tr("Mesh maximum vertex count must be in [0, 1000000]"));
++  }
++
+   if (levelName.isEmpty()) {
+     return context()->throwError(tr("Level name cannot be empty"));
+   }
+@@ -566,9 +595,9 @@
+ 
+   // Build mesh from raster
+   MeshBuilderOptions opts;
+-  opts.m_margin               = 5;
+-  opts.m_targetEdgeLength     = 15.0;
+-  opts.m_targetMaxVerticesCount = 0;
++  opts.m_margin                 = margin;
++  opts.m_targetEdgeLength       = targetEdgeLength;
++  opts.m_targetMaxVerticesCount = maxVertices;
+   opts.m_transparentColor     = TPixel64::Transparent;
+ 
+   TMeshImageP meshImg = ::buildMesh(ras, opts);
+
