@@ -1,13 +1,15 @@
+diff --git a/HEADLESS_API.md b/HEADLESS_API.md
+index e851c87..d25155a 100644
 --- a/HEADLESS_API.md
 +++ b/HEADLESS_API.md
-@@ -1228,3 +1228,57 @@
+@@ -1228,3 +1228,57 @@ Build:   cd toonz/sources/build && ninja toonz_headless
  - **Vector images**: Stage coordinates, center at (0,0), units ≈ pixels at 72 DPI
  - **Raster canvas**: Pixel coordinates, origin at bottom-left corner
  - **Rasterizer**: Maps stage coordinates to output resolution via camera/DPI settings
 +
 +---
 +
-+## Furry Companion extensions (FCS patch v0.7)
++## Furry Companion extensions (FCS patch v0.7.1)
 +
 +The following methods are **not part of the unmodified upstream API**. They are added by the Furry Companion patch bundle. They expose selected Plastic mesh controls from the existing C++ engine; they do not implement a second deformer.
 +
@@ -58,10 +60,11 @@
 +### Compatibility and error behavior
 +
 +The capability probe in Furry Animation Studio deliberately rejects an unpatched `toonz_headless` binary rather than silently falling back to the old Python deformation engine. `buildMeshAdvanced`, the three mesh inspection/rigidity methods, and `setVertexAngleLimits` must all be present for the FCS native export path.
-
+diff --git a/toonz/sources/include/toonz/scriptbinding_level.h b/toonz/sources/include/toonz/scriptbinding_level.h
+index 0deda17..e34ee2e 100644
 --- a/toonz/sources/include/toonz/scriptbinding_level.h
 +++ b/toonz/sources/include/toonz/scriptbinding_level.h
-@@ -50,6 +50,15 @@
+@@ -50,6 +50,15 @@ public:
    Q_INVOKABLE QScriptValue setFrame(const QScriptValue &fid,
                                      const QScriptValue &image);
  
@@ -77,10 +80,11 @@
    // Level operations
    Q_INVOKABLE QScriptValue getFrameIds();
    Q_INVOKABLE QScriptValue load(const QScriptValue &fp);
-
+diff --git a/toonz/sources/include/toonz/scriptbinding_plasticrig.h b/toonz/sources/include/toonz/scriptbinding_plasticrig.h
+index eb53ff1..5512874 100644
 --- a/toonz/sources/include/toonz/scriptbinding_plasticrig.h
 +++ b/toonz/sources/include/toonz/scriptbinding_plasticrig.h
-@@ -29,6 +29,10 @@
+@@ -29,6 +29,10 @@ public:
    Q_INVOKABLE QScriptValue moveVertex(int vertexIdx, double x, double y);
    Q_INVOKABLE QScriptValue removeVertex(int vertexIdx);
    Q_INVOKABLE QScriptValue setVertexName(int vertexIdx, const QString &name);
@@ -91,10 +95,11 @@
  
    // Keyframing deformation
    Q_INVOKABLE QScriptValue setVertexKeyframe(int vertexIdx, double frame,
-
+diff --git a/toonz/sources/include/toonz/scriptbinding_scene.h b/toonz/sources/include/toonz/scriptbinding_scene.h
+index 997c2b5..b9bf652 100644
 --- a/toonz/sources/include/toonz/scriptbinding_scene.h
 +++ b/toonz/sources/include/toonz/scriptbinding_scene.h
-@@ -73,9 +73,15 @@
+@@ -73,9 +73,15 @@ public:
    // Export
    Q_INVOKABLE QScriptValue exportResources(const QString &destDir);
  
@@ -111,10 +116,11 @@
  
    // Motion path splines
    Q_INVOKABLE QScriptValue createSpline(const QScriptValue &pointArray);
-
+diff --git a/toonz/sources/toonz_headless/CMakeLists.txt b/toonz/sources/toonz_headless/CMakeLists.txt
+index d07095a..d699d77 100644
 --- a/toonz/sources/toonz_headless/CMakeLists.txt
 +++ b/toonz/sources/toonz_headless/CMakeLists.txt
-@@ -11,8 +11,20 @@
+@@ -11,8 +11,20 @@ target_link_libraries(toonz_headless
      toonzlib
      image
      sound
@@ -139,19 +145,21 @@
 +        colorfx
 +    )
 +endif()
-
+diff --git a/toonz/sources/toonz_headless/main.cpp b/toonz/sources/toonz_headless/main.cpp
+index d58f77e..7a4f6b0 100644
 --- a/toonz/sources/toonz_headless/main.cpp
 +++ b/toonz/sources/toonz_headless/main.cpp
-@@ -5,6 +5,8 @@
- #include <QJsonObject>
+@@ -6,6 +6,8 @@
  #include <QJsonArray>
  #include <QTimer>
-+
-+#include <cstdio>
  
++#include <cstdio>
++
  #include "tsystem.h"
  #include "tthread.h"
-
+ #include "tenv.h"
+diff --git a/toonz/sources/toonzlib/scriptbinding_level.cpp b/toonz/sources/toonzlib/scriptbinding_level.cpp
+index 171cd87..1cb0565 100644
 --- a/toonz/sources/toonzlib/scriptbinding_level.cpp
 +++ b/toonz/sources/toonzlib/scriptbinding_level.cpp
 @@ -23,6 +23,8 @@
@@ -163,16 +171,16 @@
  #include "tvectorimage.h"
  #include "tpalette.h"
  #include "tofflinegl.h"
-@@ -35,6 +37,8 @@
- #include <QScriptEngine>
+@@ -36,6 +38,8 @@
  #include <QRegularExpression>
  #include <QColor>
-+
-+#include <cmath>
  
++#include <cmath>
++
  namespace TScriptBinding {
  
-@@ -455,6 +459,108 @@
+ Level::Level()
+@@ -455,6 +459,108 @@ QScriptValue Level::getFrame(const QScriptValue &fidArg) {
    return QScriptValue();
  }
  
@@ -281,27 +289,26 @@
  QScriptValue Level::getFrameByIndex(const QScriptValue &indexArg) {
    if (getFrameCount() == 0) {
      return context()->throwError("An empty level has no frames");
-
+diff --git a/toonz/sources/toonzlib/scriptbinding_plasticrig.cpp b/toonz/sources/toonzlib/scriptbinding_plasticrig.cpp
+index 80f96d7..8ca06ff 100644
 --- a/toonz/sources/toonzlib/scriptbinding_plasticrig.cpp
 +++ b/toonz/sources/toonzlib/scriptbinding_plasticrig.cpp
-@@ -3,7 +3,10 @@
+@@ -3,8 +3,11 @@
  #include "toonz/scriptbinding_plasticrig.h"
  #include "ext/plasticskeleton.h"
  #include "ext/plasticskeletondeformation.h"
 +#include "ext/plasticdeformerstorage.h"
  #include "tdoublekeyframe.h"
-+
-+#include <cmath>
  
++#include <cmath>
++
  namespace TScriptBinding {
  
-@@ -55,6 +58,29 @@
-         tr("Vertex index %1 out of range").arg(vertexIdx));
-   }
-   m_skeleton->moveVertex(vertexIdx, TPointD(x, y));
-+  return context()->thisObject();
-+}
-+
+ PlasticRig::PlasticRig()
+@@ -58,6 +61,29 @@ QScriptValue PlasticRig::moveVertex(int vertexIdx, double x, double y) {
+   return context()->thisObject();
+ }
+ 
 +QScriptValue PlasticRig::setVertexAngleLimits(int vertexIdx,
 +                                                   double minAngle,
 +                                                   double maxAngle) {
@@ -322,10 +329,14 @@
 +  // changing limits so a later render cannot reuse stale deformation data.
 +  PlasticDeformerStorage::instance()->invalidateSkeleton(
 +      m_deformation, 0, PlasticDeformerStorage::ALL);
-   return context()->thisObject();
- }
- 
-
++  return context()->thisObject();
++}
++
+ QScriptValue PlasticRig::removeVertex(int vertexIdx) {
+   if (vertexIdx < 0 || vertexIdx >= getVertexCount()) {
+     return context()->throwError(
+diff --git a/toonz/sources/toonzlib/scriptbinding_scene.cpp b/toonz/sources/toonzlib/scriptbinding_scene.cpp
+index 80ee8ee..2ce1c8e 100644
 --- a/toonz/sources/toonzlib/scriptbinding_scene.cpp
 +++ b/toonz/sources/toonzlib/scriptbinding_scene.cpp
 @@ -34,6 +34,8 @@
@@ -337,21 +348,15 @@
  namespace TScriptBinding {
  
  Scene::Scene() {
-@@ -123,6 +125,13 @@
-                              const QString &levelName) const {
+@@ -124,7 +126,6 @@ QScriptValue Scene::newLevel(const QString &levelTypeStr,
    if (levelName.isEmpty()) {
      return context()->throwError(tr("Level name cannot be empty"));
-+  }
-+  if (!std::isfinite(targetEdgeLength) || targetEdgeLength < 2.0 ||
-+      targetEdgeLength > 256.0 || margin < 0 || margin > 128 ||
-+      maxVertices < 0 || maxVertices > 1000000) {
-+    return context()->throwError(
-+        tr("Invalid mesh options (edge length 2..256, margin 0..128, "
-+           "max vertices 0..1000000)"));
    }
- 
+-
    int levelType = NO_XSHLEVEL;
-@@ -532,6 +541,13 @@
+   if (levelTypeStr == "Vector")
+     levelType = PLI_XSHLEVEL;
+@@ -532,6 +533,13 @@ QScriptValue Scene::enableColumnOpacity(bool on) {
  
  QScriptValue Scene::buildMesh(const QScriptValue &imageArg,
                                const QString &levelName) {
@@ -365,7 +370,7 @@
    Image *img = qscriptvalue_cast<Image *>(imageArg);
    if (!img || !img->getImg()) {
      return context()->throwError(tr("Expected an Image argument"));
-@@ -556,6 +572,19 @@
+@@ -556,6 +564,19 @@ QScriptValue Scene::buildMesh(const QScriptValue &imageArg,
    if (dpix <= 0) dpix = 72.0;
    if (dpiy <= 0) dpiy = 72.0;
  
@@ -385,7 +390,7 @@
    if (levelName.isEmpty()) {
      return context()->throwError(tr("Level name cannot be empty"));
    }
-@@ -566,9 +595,9 @@
+@@ -566,9 +587,9 @@ QScriptValue Scene::buildMesh(const QScriptValue &imageArg,
  
    // Build mesh from raster
    MeshBuilderOptions opts;
@@ -398,4 +403,3 @@
    opts.m_transparentColor     = TPixel64::Transparent;
  
    TMeshImageP meshImg = ::buildMesh(ras, opts);
-
