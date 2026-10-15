@@ -37,23 +37,34 @@ jobs:
           $vswhere = Join-Path $programFilesX86 'Microsoft Visual Studio\Installer\vswhere.exe'
           if (!(Test-Path $vswhere)) { throw "vswhere.exe was not found on windows-2022 runner: $vswhere" }
           $vsPath = & $vswhere -latest -version '[17.0,18.0)' -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-          if ($LASTEXITCODE -ne 0 -or !$vsPath) { throw 'Visual Studio 2022 C++ x64 toolchain not found. This workflow requires the windows-2022 runner image.' }
+          if ($LASTEXITCODE -ne 0 -or !$vsPath) { throw 'Visual Studio 2022 C++ x64 toolchain not found. This workflow requires windows-2022.' }
           Write-Host "Visual Studio 2022: $vsPath"
           cmake --version
           git --version
 
-      - name: Check and apply FCS source patch
+      - name: Check and apply corrected FCS API patch
         shell: pwsh
         run: |
           $patch = Join-Path $env:GITHUB_WORKSPACE 'OpenToonz_Headless_FCS_v0_7.diff'
-          if (!(Test-Path $patch)) {
-            throw "Missing OpenToonz_Headless_FCS_v0_7.diff in repository root. Upload the diff from the build kit first."
-          }
+          if (!(Test-Path $patch)) { throw "Missing OpenToonz_Headless_FCS_v0_7.diff in repository root." }
           git apply --check $patch
-          if ($LASTEXITCODE -ne 0) { throw "Patch does not match this source revision; stopped before modifying or building source." }
+          if ($LASTEXITCODE -ne 0) { throw "Corrected patch does not match this source revision. No files were changed." }
           git apply $patch
           if ($LASTEXITCODE -ne 0) { throw "git apply failed." }
-          "Patch applied to commit $env:GITHUB_SHA" | Out-File -FilePath "$env:GITHUB_WORKSPACE\fcs-build-source.txt" -Encoding utf8
+          Write-Host 'Corrected patch applied.'
+
+          # Regression guard for the compile error in the previous patch:
+          # mesh parameters must be validated only inside buildMeshAdvanced, not newLevel.
+          $sceneFile = Join-Path $env:GITHUB_WORKSPACE 'toonz\sources\toonzlib\scriptbinding_scene.cpp'
+          $scene = Get-Content $sceneFile -Raw
+          $match = [regex]::Match($scene, '(?s)QScriptValue Scene::newLevel\b.*?(?=\nQScriptValue Scene::|\z)')
+          if (!$match.Success) { throw 'Could not locate Scene::newLevel for source sanity check.' }
+          if ($match.Value -match '\b(targetEdgeLength|margin|maxVertices)\b') {
+            throw 'Patch regression: mesh parameter validation was found inside Scene::newLevel.'
+          }
+          if ($scene -notmatch 'QScriptValue Scene::buildMeshAdvanced') { throw 'buildMeshAdvanced implementation is missing.' }
+          Write-Host 'C++ source sanity checks passed.'
+          "Corrected FCS patch applied to commit $env:GITHUB_SHA" | Out-File -FilePath "$env:GITHUB_WORKSPACE\fcs-build-source.txt" -Encoding utf8
 
       - name: Install OpenCV and Boost if not present
         shell: pwsh
@@ -89,18 +100,29 @@ jobs:
       - name: Configure OpenToonz Headless
         shell: pwsh
         run: |
-          cmake -S 'toonz\sources' -B 'toonz\build' -G 'Visual Studio 17 2022' -A x64 `
-            "-DQT_PATH=$env:QT_PATH" `
-            "-DBOOST_ROOT=$env:BOOST_ROOT" `
-            "-DOpenCV_DIR=$env:OpenCV_DIR" `
-            -DWITH_WINTAB=Y
-          if ($LASTEXITCODE -ne 0) { throw 'CMake configuration failed; see the configure log above.' }
+          $configureLog = Join-Path $env:GITHUB_WORKSPACE 'build-fcs-configure.log'
+          $cmd = 'cmake -S "toonz\sources" -B "toonz\build" -G "Visual Studio 17 2022" -A x64 -DQT_PATH="' + $env:QT_PATH + '" -DBOOST_ROOT="' + $env:BOOST_ROOT + '" -DOpenCV_DIR="' + $env:OpenCV_DIR + '" -DWITH_WINTAB=Y > "build-fcs-configure.log" 2>&1'
+          & cmd.exe /d /s /c $cmd
+          $configureExit = $LASTEXITCODE
+          if (Test-Path $configureLog) { Get-Content $configureLog -Tail 100 }
+          if ($configureExit -ne 0) { throw "CMake configuration failed (exit $configureExit). Full log will be uploaded if the job fails." }
 
-      - name: Build only the headless engine
+      - name: Build native headless engine (capture full compiler log)
         shell: pwsh
         run: |
-          cmake --build 'toonz\build' --config RelWithDebInfo --target toonz_headless --parallel 2
-          if ($LASTEXITCODE -ne 0) { throw 'toonz_headless native build failed.' }
+          $buildLog = Join-Path $env:GITHUB_WORKSPACE 'build-fcs-native.log'
+          $cmd = 'cmake --build "toonz\build" --config RelWithDebInfo --target toonz_headless --parallel 2 --verbose > "build-fcs-native.log" 2>&1'
+          & cmd.exe /d /s /c $cmd
+          $buildExit = $LASTEXITCODE
+          if (Test-Path $buildLog) {
+            Write-Host '===== Native build log (last 180 lines) ====='
+            Get-Content $buildLog -Tail 180
+            Write-Host '===== Compiler/linker diagnostics found in build log ====='
+            $diag = Select-String -Path $buildLog -Pattern 'error C[0-9]+|fatal error|error LNK[0-9]+|error MSB[0-9]+|FAILED:|CMake Error|undefined reference|unresolved external' | Select-Object -Last 80
+            if ($diag) { $diag | ForEach-Object { Write-Host $_.Line } }
+            else { Write-Host 'No standard compiler diagnostic pattern matched; inspect the full uploaded log.' }
+          }
+          if ($buildExit -ne 0) { throw "toonz_headless native build failed (exit $buildExit). Download artifact FCS-native-build-diagnostics for the full compiler log." }
           $exe = 'toonz\build\RelWithDebInfo\toonz_headless.exe'
           if (!(Test-Path $exe)) { throw "Build reported success but executable was not found at $exe" }
 
@@ -158,7 +180,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Native smoke test failed; artifact will not be uploaded.' }
           $manifest = [ordered]@{
             name = 'Furry Companion OpenToonz Headless';
-            version = 'FCS-API-v0.7';
+            version = 'FCS-API-v0.7.1';
             source_commit = $env:GITHUB_SHA;
             build_configuration = 'RelWithDebInfo';
             architecture = 'x64';
@@ -175,4 +197,17 @@ jobs:
           name: FurryCompanion-OpenToonz-Headless-Windows-x64
           path: artifact/FurryCompanion_OpenToonz_Headless_Windows_x64/
           if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload build diagnostics on failure
+        if: failure()
+        uses: actions/upload-artifact@v6
+        with:
+          name: FCS-native-build-diagnostics
+          path: |
+            build-fcs-configure.log
+            build-fcs-native.log
+            toonz/build/CMakeCache.txt
+            fcs-build-source.txt
+          if-no-files-found: ignore
           retention-days: 7 
