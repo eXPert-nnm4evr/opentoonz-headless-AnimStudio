@@ -151,16 +151,21 @@ jobs:
           $exe = 'toonz\build\RelWithDebInfo\toonz_headless.exe'
           if (!(Test-Path $exe)) { throw "Build reported success but executable was not found at $exe" }
 
-      - name: Assemble portable runtime and run smoke test
+      - name: Assemble portable runtime and run staged smoke diagnostics
         shell: pwsh
         run: |
           $src = Join-Path $env:GITHUB_WORKSPACE 'toonz\build\RelWithDebInfo'
           $bundle = Join-Path $env:GITHUB_WORKSPACE 'artifact\FurryCompanion_OpenToonz_Headless_Windows_x64'
-          New-Item -ItemType Directory -Force $bundle | Out-Null
+          $diag = Join-Path $env:GITHUB_WORKSPACE 'native-smoke-diagnostics'
+          New-Item -ItemType Directory -Force $bundle, $diag | Out-Null
           Copy-Item (Join-Path $src 'toonz_headless.exe') $bundle -Force
           Get-ChildItem $src -Filter '*.dll' | ForEach-Object { Copy-Item $_.FullName $bundle -Force }
-          & "$env:QT_PATH\bin\windeployqt.exe" --release --compiler-runtime --no-translations (Join-Path $bundle 'toonz_headless.exe')
-          if ($LASTEXITCODE -ne 0) { throw 'windeployqt failed.' }
+
+          $deployLog = Join-Path $env:GITHUB_WORKSPACE 'windeployqt.log'
+          & "$env:QT_PATH\bin\windeployqt.exe" --release --compiler-runtime --no-translations (Join-Path $bundle 'toonz_headless.exe') 2>&1 | Tee-Object -FilePath $deployLog
+          $deployExit = $LASTEXITCODE
+          if ($deployExit -ne 0) { throw "windeployqt failed (exit $deployExit). Inspect windeployqt.log." }
+
           $extraDlls = @(
             'thirdparty\glut\3.7.6\lib\glut64.dll',
             'thirdparty\glew\glew-1.9.0\bin\64bit\glew32.dll',
@@ -176,33 +181,118 @@ jobs:
           }
           Copy-Item 'stuff' (Join-Path $bundle 'portablestuff') -Recurse -Force
           $env:TOONZROOT = Join-Path $bundle 'portablestuff'
+          $env:QT_DEBUG_PLUGINS = '1'
           $exe = Join-Path $bundle 'toonz_headless.exe'
+
+          # Preserve evidence even if the process dies before writing a JSON-RPC response.
+          Get-ChildItem $bundle -Recurse -File | ForEach-Object {
+            [PSCustomObject]@{ RelativePath = $_.FullName.Substring($bundle.Length).TrimStart('\'); Bytes = $_.Length }
+          } | Export-Csv (Join-Path $env:GITHUB_WORKSPACE 'runtime-file-list.csv') -NoTypeInformation -Encoding utf8
+          @"
+          Executable: $exe
+          TOONZROOT: $env:TOONZROOT
+          QT_PATH: $env:QT_PATH
+          QT_DEBUG_PLUGINS: $env:QT_DEBUG_PLUGINS
+          Runner: $env:RUNNER_OS / $env:RUNNER_ARCH
+          "@ | Set-Content (Join-Path $env:GITHUB_WORKSPACE 'runtime-environment.txt') -Encoding utf8
+
+          $programFilesX86 = [Environment]::GetFolderPath('ProgramFilesX86')
+          $vswhere = Join-Path $programFilesX86 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (Test-Path $vswhere) {
+            $vsPath = & $vswhere -latest -version '[17.0,18.0)' -products '*' -property installationPath
+            $dumpbin = Get-ChildItem (Join-Path $vsPath 'VC\Tools\MSVC') -Filter dumpbin.exe -Recurse -ErrorAction SilentlyContinue |
+              Where-Object { $_.FullName -match '\\bin\\Hostx64\\x64\\dumpbin\.exe$' } | Select-Object -First 1
+            if ($dumpbin) {
+              & $dumpbin.FullName /nologo /dependents $exe 2>&1 | Out-File (Join-Path $env:GITHUB_WORKSPACE 'runtime-pe-dependencies.txt') -Encoding utf8
+              $toonzlib = Join-Path $bundle 'toonzlib.dll'
+              if (Test-Path $toonzlib) { & $dumpbin.FullName /nologo /dependents $toonzlib 2>&1 | Out-File (Join-Path $env:GITHUB_WORKSPACE 'runtime-pe-dependencies.txt') -Append -Encoding utf8 }
+            }
+          }
+
           @'
-          import json, os, subprocess, sys
-          exe = sys.argv[1]
-          requests = '\n'.join([
-              json.dumps({'jsonrpc':'2.0','id':1,'method':'ping','params':{}}),
-              json.dumps({'jsonrpc':'2.0','id':2,'method':'eval','params':{'code':'var s = new Scene(); print(typeof s.buildMeshAdvanced); var r = new PlasticRig(); print(typeof r.setVertexAngleLimits);'}}),
-              json.dumps({'jsonrpc':'2.0','id':3,'method':'quit','params':{}}),
-              ''
-          ])
-          p = subprocess.run([exe], input=requests, text=True, capture_output=True, timeout=90, env=os.environ.copy(), cwd=os.path.dirname(exe))
-          text = p.stdout + '\n' + p.stderr
-          print(text)
-          if p.returncode != 0: raise SystemExit('Headless executable returned non-zero exit code')
-          lines = [line for line in p.stdout.splitlines() if line.strip().startswith('{')]
-          data = []
-          for line in lines:
-              try: data.append(json.loads(line))
-              except Exception: pass
-          if not any(x.get('result') == 'pong' for x in data): raise SystemExit('Ping smoke test failed')
-          evals = [x.get('result', {}).get('output', '') for x in data if x.get('id') == 2 and isinstance(x.get('result'), dict)]
-          eval_text = '\n'.join(evals)
-          if 'function' not in eval_text: raise SystemExit('FCS API smoke test failed: patched methods are not exposed as functions')
-          print('FCS native smoke test PASSED')
+          import json
+          import os
+          import pathlib
+          import subprocess
+          import sys
+          import traceback
+
+          exe = pathlib.Path(sys.argv[1]).resolve()
+          root = pathlib.Path.cwd()
+          outdir = root / "native-smoke-diagnostics"
+          outdir.mkdir(parents=True, exist_ok=True)
+          os.environ["QT_DEBUG_PLUGINS"] = "1"
+          stages = [
+              ("01_ping", [{"jsonrpc":"2.0","id":1,"method":"ping","params":{}},
+                            {"jsonrpc":"2.0","id":99,"method":"quit","params":{}}], "pong"),
+              ("02_bindings_globals", [{"jsonrpc":"2.0","id":1,"method":"eval","params":{"code":"print(typeof Scene); print(typeof PlasticRig);"}},
+                                        {"jsonrpc":"2.0","id":99,"method":"quit","params":{}}], "function"),
+              ("03_scene_fcs_api", [{"jsonrpc":"2.0","id":1,"method":"eval","params":{"code":"var s = new Scene(); print(typeof s.buildMeshAdvanced); print(typeof s.getMeshInfo); print(typeof s.getMeshVertices); print(typeof s.setMeshRigidityAtPoint);"}},
+                                    {"jsonrpc":"2.0","id":99,"method":"quit","params":{}}], "function"),
+              ("04_rig_fcs_api", [{"jsonrpc":"2.0","id":1,"method":"eval","params":{"code":"var r = new PlasticRig(); print(typeof r.setVertexAngleLimits);"}},
+                                  {"jsonrpc":"2.0","id":99,"method":"quit","params":{}}], "function"),
+          ]
+          all_ok = True
+          summaries = []
+
+          def parse_json_lines(stdout):
+              parsed = []
+              for line in stdout.splitlines():
+                  line = line.strip()
+                  if not line.startswith("{"):
+                      continue
+                  try:
+                      parsed.append(json.loads(line))
+                  except Exception:
+                      pass
+              return parsed
+
+          for name, requests, expected in stages:
+              payload = "\n".join(json.dumps(x, separators=(",", ":")) for x in requests) + "\n"
+              stage_path = outdir / f"{name}.txt"
+              try:
+                  p = subprocess.run([str(exe)], input=payload, text=True, capture_output=True,
+                                     timeout=90, env=os.environ.copy(), cwd=str(exe.parent))
+                  hexcode = f"0x{(p.returncode & 0xffffffff):08X}"
+                  parsed = parse_json_lines(p.stdout)
+                  response_text = "\n".join(str(x.get("result", {}).get("output", "")) for x in parsed if x.get("id") == 1)
+                  if name == "01_ping":
+                      matched = any(x.get("id") == 1 and x.get("result") == "pong" for x in parsed)
+                  else:
+                      matched = expected in response_text
+                  stage_ok = (p.returncode == 0 and matched)
+                  report = (
+                      f"STAGE={name}\nEXECUTABLE={exe}\nRETURN_CODE_DECIMAL={p.returncode}\nRETURN_CODE_HEX={hexcode}\n"
+                      f"EXPECTED={expected}\nMATCHED={matched}\nPASS={stage_ok}\n\n"
+                      f"--- STDOUT ---\n{p.stdout}\n--- STDERR ---\n{p.stderr}\n"
+                      f"--- PARSED JSON ---\n{json.dumps(parsed, indent=2, ensure_ascii=False)}\n"
+                  )
+                  stage_path.write_text(report, encoding="utf-8")
+                  print(f"===== {name}: return={p.returncode} ({hexcode}), matched={matched} =====")
+                  print("--- stdout ---")
+                  print(p.stdout[-12000:] if p.stdout else "<empty>")
+                  print("--- stderr ---")
+                  print(p.stderr[-12000:] if p.stderr else "<empty>")
+                  summaries.append({"stage":name,"return_code":p.returncode,"return_code_hex":hexcode,"matched":matched,"passed":stage_ok})
+                  all_ok = all_ok and stage_ok
+              except Exception as exc:
+                  report = f"STAGE={name}\nEXCEPTION={type(exc).__name__}: {exc}\n{traceback.format_exc()}"
+                  stage_path.write_text(report, encoding="utf-8")
+                  print(report)
+                  summaries.append({"stage":name,"exception":f"{type(exc).__name__}: {exc}","passed":False})
+                  all_ok = False
+
+          (outdir / "summary.json").write_text(json.dumps(summaries, indent=2), encoding="utf-8")
+          print("===== SMOKE SUMMARY =====")
+          print(json.dumps(summaries, indent=2))
+          if not all_ok:
+              raise SystemExit(1)
+          print("FCS native smoke test PASSED")
           '@ | Set-Content -Path 'smoke_test.py' -Encoding utf8
           python smoke_test.py $exe
-          if ($LASTEXITCODE -ne 0) { throw 'Native smoke test failed; artifact will not be uploaded.' }
+          $smokeExit = $LASTEXITCODE
+          if ($smokeExit -ne 0) { throw "Native smoke test failed (exit $smokeExit). Download FCS-native-build-diagnostics and inspect native-smoke-diagnostics\01_ping.txt first." }
+
           $manifest = [ordered]@{
             name = 'Furry Companion OpenToonz Headless';
             version = 'FCS-API-v0.7.2';
@@ -232,6 +322,12 @@ jobs:
           path: |
             build-fcs-configure.log
             build-fcs-native.log
+            windeployqt.log
+            runtime-environment.txt
+            runtime-file-list.csv
+            runtime-pe-dependencies.txt
+            smoke_test.py
+            native-smoke-diagnostics/**
             toonz/build/CMakeCache.txt
             toonz/build/toonzlib/toonzlib.vcxproj
             toonz/build/toonzlib/moc_scriptbinding_effect.cpp
