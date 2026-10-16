@@ -283,18 +283,64 @@ jobs:
           outdir = root / "native-smoke-diagnostics"
           outdir.mkdir(parents=True, exist_ok=True)
           os.environ["QT_DEBUG_PLUGINS"] = "1"
+
+          # Keep RPC responses typed: JSON-RPC may return strings for ping/quit,
+          # while eval returns an object containing the captured script output.
           stages = [
-              ("01_ping", [{"jsonrpc":"2.0","id":1,"method":"ping","params":{}},
-                            {"jsonrpc":"2.0","id":99,"method":"quit","params":{}}], "pong"),
-              ("02_bindings_globals", [{"jsonrpc":"2.0","id":1,"method":"eval","params":{"code":"print(typeof Scene); print(typeof PlasticRig);"}},
-                                        {"jsonrpc":"2.0","id":99,"method":"quit","params":{}}], "function"),
-              ("03_scene_fcs_api", [{"jsonrpc":"2.0","id":1,"method":"eval","params":{"code":"var s = new Scene(); print(typeof s.buildMeshAdvanced); print(typeof s.getMeshInfo); print(typeof s.getMeshVertices); print(typeof s.setMeshRigidityAtPoint);"}},
-                                    {"jsonrpc":"2.0","id":99,"method":"quit","params":{}}], "function"),
-              ("04_rig_fcs_api", [{"jsonrpc":"2.0","id":1,"method":"eval","params":{"code":"var r = new PlasticRig(); print(typeof r.setVertexAngleLimits);"}},
-                                  {"jsonrpc":"2.0","id":99,"method":"quit","params":{}}], "function"),
+              {
+                  "name": "01_ping",
+                  "requests": [
+                      {"jsonrpc": "2.0", "id": 1, "method": "ping", "params": {}},
+                      {"jsonrpc": "2.0", "id": 99, "method": "quit", "params": {}},
+                  ],
+                  "mode": "result",
+                  "expected": "pong",
+              },
+              {
+                  "name": "02_bindings_globals",
+                  "requests": [
+                      {"jsonrpc": "2.0", "id": 1, "method": "eval", "params": {
+                          "code": "print(typeof Image); print(typeof Level); print(typeof Scene); print(typeof PlasticRig);"
+                      }},
+                      {"jsonrpc": "2.0", "id": 99, "method": "quit", "params": {}},
+                  ],
+                  "mode": "output_lines",
+                  "expected": ["function", "function", "function", "function"],
+              },
+              {
+                  "name": "03_scene_fcs_api",
+                  "requests": [
+                      {"jsonrpc": "2.0", "id": 1, "method": "eval", "params": {
+                          "code": "var s = new Scene(); print(typeof s.buildMeshAdvanced);"
+                      }},
+                      {"jsonrpc": "2.0", "id": 99, "method": "quit", "params": {}},
+                  ],
+                  "mode": "output_lines",
+                  "expected": ["function"],
+              },
+              {
+                  "name": "04_level_fcs_api",
+                  "requests": [
+                      {"jsonrpc": "2.0", "id": 1, "method": "eval", "params": {
+                          "code": "var l = new Level(); print(typeof l.getMeshInfo); print(typeof l.getMeshVertices); print(typeof l.setMeshRigidityAtPoint);"
+                      }},
+                      {"jsonrpc": "2.0", "id": 99, "method": "quit", "params": {}},
+                  ],
+                  "mode": "output_lines",
+                  "expected": ["function", "function", "function"],
+              },
+              {
+                  "name": "05_rig_fcs_api",
+                  "requests": [
+                      {"jsonrpc": "2.0", "id": 1, "method": "eval", "params": {
+                          "code": "var r = new PlasticRig(); print(typeof r.setVertexAngleLimits);"
+                      }},
+                      {"jsonrpc": "2.0", "id": 99, "method": "quit", "params": {}},
+                  ],
+                  "mode": "output_lines",
+                  "expected": ["function"],
+              },
           ]
-          all_ok = True
-          summaries = []
 
           def parse_json_lines(stdout):
               parsed = []
@@ -303,12 +349,22 @@ jobs:
                   if not line.startswith("{"):
                       continue
                   try:
-                      parsed.append(json.loads(line))
+                      value = json.loads(line)
+                      if isinstance(value, dict):
+                          parsed.append(value)
                   except Exception:
                       pass
               return parsed
 
-          for name, requests, expected in stages:
+          def response_for(parsed, request_id):
+              return next((item for item in parsed if item.get("id") == request_id), None)
+
+          all_ok = True
+          summaries = []
+          for stage in stages:
+              name = stage["name"]
+              requests = stage["requests"]
+              expected = stage["expected"]
               payload = "\n".join(json.dumps(x, separators=(",", ":")) for x in requests) + "\n"
               stage_path = outdir / f"{name}.txt"
               try:
@@ -316,31 +372,47 @@ jobs:
                                      timeout=90, env=os.environ.copy(), cwd=str(exe.parent))
                   hexcode = f"0x{(p.returncode & 0xffffffff):08X}"
                   parsed = parse_json_lines(p.stdout)
-                  response_text = "\n".join(str(x.get("result", {}).get("output", "")) for x in parsed if x.get("id") == 1)
-                  if name == "01_ping":
-                      matched = any(x.get("id") == 1 and x.get("result") == "pong" for x in parsed)
+                  response = response_for(parsed, 1)
+
+                  if stage["mode"] == "result":
+                      result = response.get("result") if response is not None else None
+                      actual = result
+                      matched = (result == expected)
                   else:
-                      matched = expected in response_text
-                  stage_ok = (p.returncode == 0 and matched)
+                      result = response.get("result") if response is not None else None
+                      output = result.get("output", "") if isinstance(result, dict) else ""
+                      actual = output.splitlines()
+                      matched = (actual == expected)
+
+                  stage_ok = (p.returncode == 0 and response is not None and matched)
                   report = (
                       f"STAGE={name}\nEXECUTABLE={exe}\nRETURN_CODE_DECIMAL={p.returncode}\nRETURN_CODE_HEX={hexcode}\n"
-                      f"EXPECTED={expected}\nMATCHED={matched}\nPASS={stage_ok}\n\n"
+                      f"EXPECTED={json.dumps(expected, ensure_ascii=False)}\nACTUAL={json.dumps(actual, ensure_ascii=False)}\n"
+                      f"MATCHED={matched}\nPASS={stage_ok}\n\n"
                       f"--- STDOUT ---\n{p.stdout}\n--- STDERR ---\n{p.stderr}\n"
                       f"--- PARSED JSON ---\n{json.dumps(parsed, indent=2, ensure_ascii=False)}\n"
                   )
                   stage_path.write_text(report, encoding="utf-8")
-                  print(f"===== {name}: return={p.returncode} ({hexcode}), matched={matched} =====")
+                  print(f"===== {name}: return={p.returncode} ({hexcode}), matched={matched}, passed={stage_ok} =====")
                   print("--- stdout ---")
                   print(p.stdout[-12000:] if p.stdout else "<empty>")
                   print("--- stderr ---")
                   print(p.stderr[-12000:] if p.stderr else "<empty>")
-                  summaries.append({"stage":name,"return_code":p.returncode,"return_code_hex":hexcode,"matched":matched,"passed":stage_ok})
+                  summaries.append({
+                      "stage": name,
+                      "return_code": p.returncode,
+                      "return_code_hex": hexcode,
+                      "expected": expected,
+                      "actual": actual,
+                      "matched": matched,
+                      "passed": stage_ok,
+                  })
                   all_ok = all_ok and stage_ok
               except Exception as exc:
                   report = f"STAGE={name}\nEXCEPTION={type(exc).__name__}: {exc}\n{traceback.format_exc()}"
                   stage_path.write_text(report, encoding="utf-8")
                   print(report)
-                  summaries.append({"stage":name,"exception":f"{type(exc).__name__}: {exc}","passed":False})
+                  summaries.append({"stage": name, "exception": f"{type(exc).__name__}: {exc}", "passed": False})
                   all_ok = False
 
           (outdir / "summary.json").write_text(json.dumps(summaries, indent=2), encoding="utf-8")
@@ -356,7 +428,7 @@ jobs:
 
           $manifest = [ordered]@{
             name = 'Furry Companion OpenToonz Headless';
-            version = 'FCS-API-v0.7.2-runtime-fix';
+            version = 'FCS-API-v0.7.2-runtime-fix3-smoke-fix';
             source_commit = $env:GITHUB_SHA;
             build_configuration = 'RelWithDebInfo';
             architecture = 'x64';
