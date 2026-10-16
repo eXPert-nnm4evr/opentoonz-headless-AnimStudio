@@ -63,7 +63,21 @@ jobs:
             throw 'Patch regression: mesh parameter validation was found inside Scene::newLevel.'
           }
           if ($scene -notmatch 'QScriptValue Scene::buildMeshAdvanced') { throw 'buildMeshAdvanced implementation is missing.' }
-          Write-Host 'C++ source sanity checks passed.'
+
+          # C2491 guard: dependency headers may redefine generic DVAPI (e.g. tfx.h).
+          # All Q_OBJECT wrappers must use the dedicated script-binding export macro.
+          $bindingDir = Join-Path $env:GITHUB_WORKSPACE 'toonz\sources\include\toonz'
+          $bindingHeader = Get-Content (Join-Path $bindingDir 'scriptbinding.h') -Raw
+          if ($bindingHeader -notmatch '#define SCRIPTBINDING_API DV_EXPORT_API' -or $bindingHeader -notmatch '#define SCRIPTBINDING_API DV_IMPORT_API') {
+            throw 'SCRIPTBINDING_API export/import definitions are missing.'
+          }
+          $badWrappers = Get-ChildItem $bindingDir -Filter 'scriptbinding*.h' | Select-String -Pattern 'class\s+DVAPI\s+'
+          if ($badWrappers) { throw ('Some scriptbinding wrappers still use the unstable DVAPI macro: ' + (($badWrappers | ForEach-Object { $_.Path }) -join ', ')) }
+          $toonzlibCmake = Get-Content (Join-Path $env:GITHUB_WORKSPACE 'toonz\sources\toonzlib\CMakeLists.txt') -Raw
+          if ($toonzlibCmake -notmatch 'target_compile_definitions\(toonzlib PRIVATE TOONZLIB_EXPORTS\)') {
+            throw 'Explicit TOONZLIB_EXPORTS target definition is missing.'
+          }
+          Write-Host 'C++ source sanity checks passed, including Qt MOC export-macro guard.'
           "Corrected FCS patch applied to commit $env:GITHUB_SHA" | Out-File -FilePath "$env:GITHUB_WORKSPACE\fcs-build-source.txt" -Encoding utf8
 
       - name: Install OpenCV and Boost if not present
@@ -106,6 +120,17 @@ jobs:
           $configureExit = $LASTEXITCODE
           if (Test-Path $configureLog) { Get-Content $configureLog -Tail 100 }
           if ($configureExit -ne 0) { throw "CMake configuration failed (exit $configureExit). Full log will be uploaded if the job fails." }
+          $projectFile = Join-Path $env:GITHUB_WORKSPACE 'toonz\build\toonzlib\toonzlib.vcxproj'
+          if (!(Test-Path $projectFile)) {
+            $candidate = Get-ChildItem (Join-Path $env:GITHUB_WORKSPACE 'toonz\build') -Recurse -Filter 'toonzlib.vcxproj' | Select-Object -First 1
+            if ($candidate) { $projectFile = $candidate.FullName }
+          }
+          if (!(Test-Path $projectFile)) { throw 'CMake succeeded but generated toonzlib.vcxproj was not found.' }
+          $projectXml = Get-Content $projectFile -Raw
+          if ($projectXml -notmatch 'TOONZLIB_EXPORTS') {
+            throw 'Generated toonzlib.vcxproj does not define TOONZLIB_EXPORTS. Refusing to compile MOC objects with import decoration.'
+          }
+          Write-Host "Verified TOONZLIB_EXPORTS in generated project: $projectFile"
 
       - name: Build native headless engine (capture full compiler log)
         shell: pwsh
@@ -180,7 +205,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Native smoke test failed; artifact will not be uploaded.' }
           $manifest = [ordered]@{
             name = 'Furry Companion OpenToonz Headless';
-            version = 'FCS-API-v0.7.1';
+            version = 'FCS-API-v0.7.2';
             source_commit = $env:GITHUB_SHA;
             build_configuration = 'RelWithDebInfo';
             architecture = 'x64';
@@ -208,6 +233,14 @@ jobs:
             build-fcs-configure.log
             build-fcs-native.log
             toonz/build/CMakeCache.txt
+            toonz/build/toonzlib/toonzlib.vcxproj
+            toonz/build/toonzlib/moc_scriptbinding_effect.cpp
+            toonz/build/toonzlib/moc_scriptbinding_scene.cpp
+            toonz/build/toonzlib/moc_scriptbinding_level.cpp
+            toonz/build/toonzlib/moc_scriptbinding_plasticrig.cpp
+            toonz/sources/include/toonz/scriptbinding.h
+            toonz/sources/include/toonz/scriptbinding_effect.h
+            toonz/sources/toonzlib/CMakeLists.txt
             fcs-build-source.txt
           if-no-files-found: ignore
           retention-days: 7 
