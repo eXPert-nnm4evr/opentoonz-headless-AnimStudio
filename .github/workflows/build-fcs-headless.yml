@@ -179,6 +179,67 @@ jobs:
             if (!(Test-Path $dll)) { throw "Required runtime DLL is missing: $dll" }
             Copy-Item $dll $bundle -Force
           }
+          # Resolve transitive Qt runtime dependencies of every packaged PE file.
+          # windeployqt follows toonz_headless.exe directly, but does not always
+          # copy Qt modules imported only by toonzlib.dll (observed: Qt5Script.dll).
+          $programFilesX86Qt = [Environment]::GetFolderPath('ProgramFilesX86')
+          $vswhereQt = Join-Path $programFilesX86Qt 'Microsoft Visual Studio\Installer\vswhere.exe'
+          if (!(Test-Path $vswhereQt)) { throw "vswhere.exe not found: $vswhereQt" }
+          $vsPathQt = (& $vswhereQt -latest -version '[17.0,18.0)' -products '*' -property installationPath | Select-Object -First 1)
+          if ([string]::IsNullOrWhiteSpace($vsPathQt)) { throw 'Visual Studio 2022 installation was not found for runtime dependency scan.' }
+          $vsPathQt = $vsPathQt.Trim()
+          $dumpbinQt = Get-ChildItem (Join-Path $vsPathQt 'VC\Tools\MSVC') -Filter dumpbin.exe -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match '\\bin\\Hostx64\\x64\\dumpbin\.exe$' } |
+            Select-Object -First 1
+          if (!$dumpbinQt) { throw 'dumpbin.exe not found; cannot validate native runtime dependencies.' }
+
+          $qtBinForDeps = Join-Path $env:QT_PATH 'bin'
+          $qtDepsLogPath = Join-Path $env:GITHUB_WORKSPACE 'runtime-qt-dependencies.txt'
+          $qtDepsLog = [System.Collections.Generic.List[string]]::new()
+          $dependencyClosureComplete = $false
+          for ($pass = 0; $pass -lt 8; $pass++) {
+            $copiedQtThisPass = $false
+            $payloadBinaries = @(Get-ChildItem $bundle -Recurse -File | Where-Object { $_.Extension -ieq '.exe' -or $_.Extension -ieq '.dll' })
+            foreach ($binary in $payloadBinaries) {
+              $dependencyOutput = & $dumpbinQt.FullName /nologo /dependents $binary.FullName 2>&1
+              $dumpExit = $LASTEXITCODE
+              if ($dumpExit -ne 0) {
+                $qtDepsLog.Add("DUMPBIN FAILED ($dumpExit): $($binary.FullName)")
+                $qtDepsLog | Set-Content -Path $qtDepsLogPath -Encoding utf8
+                throw "Could not inspect dependencies of $($binary.Name); see runtime-qt-dependencies.txt."
+              }
+              $dependencyText = $dependencyOutput -join "`n"
+              $qtMatches = [regex]::Matches($dependencyText, '(?im)^\s*(Qt5[A-Za-z0-9_]+\.dll)\s*$')
+              foreach ($match in $qtMatches) {
+                $qtDllName = $match.Groups[1].Value
+                $bundleDll = Join-Path $bundle $qtDllName
+                if (!(Test-Path $bundleDll)) {
+                  $sourceQtDll = Join-Path $qtBinForDeps $qtDllName
+                  if (!(Test-Path $sourceQtDll)) {
+                    $qtDepsLog.Add("MISSING: $qtDllName imported by $($binary.Name); searched $sourceQtDll")
+                    $qtDepsLog | Set-Content -Path $qtDepsLogPath -Encoding utf8
+                    throw "Required Qt runtime DLL '$qtDllName' (imported by '$($binary.Name)') is missing from the bundle and Qt bin folder."
+                  }
+                  Copy-Item $sourceQtDll $bundleDll -Force
+                  $qtDepsLog.Add("COPIED: $qtDllName (imported by $($binary.Name))")
+                  Write-Host "Resolved transitive Qt dependency: $qtDllName"
+                  $copiedQtThisPass = $true
+                }
+              }
+            }
+            if (!$copiedQtThisPass) {
+              $dependencyClosureComplete = $true
+              break
+            }
+          }
+          if (!$dependencyClosureComplete) {
+            $qtDepsLog.Add('ERROR: Qt dependency closure did not converge within 8 passes.')
+            $qtDepsLog | Set-Content -Path $qtDepsLogPath -Encoding utf8
+            throw 'Qt runtime dependency resolution did not converge; see runtime-qt-dependencies.txt.'
+          }
+          if ($qtDepsLog.Count -eq 0) { $qtDepsLog.Add('PASS: no missing Qt5 runtime dependencies detected.') }
+          $qtDepsLog | Set-Content -Path $qtDepsLogPath -Encoding utf8
+
           Copy-Item 'stuff' (Join-Path $bundle 'portablestuff') -Recurse -Force
           $env:TOONZROOT = Join-Path $bundle 'portablestuff'
           $env:QT_DEBUG_PLUGINS = '1'
@@ -295,7 +356,7 @@ jobs:
 
           $manifest = [ordered]@{
             name = 'Furry Companion OpenToonz Headless';
-            version = 'FCS-API-v0.7.2';
+            version = 'FCS-API-v0.7.2-runtime-fix';
             source_commit = $env:GITHUB_SHA;
             build_configuration = 'RelWithDebInfo';
             architecture = 'x64';
@@ -326,6 +387,7 @@ jobs:
             runtime-environment.txt
             runtime-file-list.csv
             runtime-pe-dependencies.txt
+            runtime-qt-dependencies.txt
             smoke_test.py
             native-smoke-diagnostics/**
             toonz/build/CMakeCache.txt
