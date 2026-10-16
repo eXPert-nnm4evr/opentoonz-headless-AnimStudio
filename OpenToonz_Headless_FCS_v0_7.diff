@@ -1,8 +1,8 @@
 diff --git a/HEADLESS_API.md b/HEADLESS_API.md
-index e851c87..d25155a 100644
+index e851c87..72cfe75 100644
 --- a/HEADLESS_API.md
 +++ b/HEADLESS_API.md
-@@ -1228,3 +1228,57 @@ Build:   cd toonz/sources/build && ninja toonz_headless
+@@ -1228,3 +1228,62 @@ Build:   cd toonz/sources/build && ninja toonz_headless
  - **Vector images**: Stage coordinates, center at (0,0), units ≈ pixels at 72 DPI
  - **Raster canvas**: Pixel coordinates, origin at bottom-left corner
  - **Rasterizer**: Maps stage coordinates to output resolution via camera/DPI settings
@@ -60,10 +60,169 @@ index e851c87..d25155a 100644
 +### Compatibility and error behavior
 +
 +The capability probe in Furry Animation Studio deliberately rejects an unpatched `toonz_headless` binary rather than silently falling back to the old Python deformation engine. `buildMeshAdvanced`, the three mesh inspection/rigidity methods, and `setVertexAngleLimits` must all be present for the FCS native export path.
++
++
++## Windows MSVC meta-object export fix (FCS patch v0.7.2)
++
++Script binding wrappers use a dedicated `SCRIPTBINDING_API` visibility macro. The generic `DVAPI` macro is redefined by headers from several OpenToonz subsystems; in particular, including `tfx.h` after `scriptbinding.h` changes it to `TFX_EXPORTS`-based visibility. That caused MSVC C2491 when a generated `moc_*.cpp` attempted to define `staticMetaObject` for a wrapper compiled into `toonzlib`. The build now sets `TOONZLIB_EXPORTS` explicitly on the `toonzlib` target, and all `scriptbinding*.h` wrapper classes use `SCRIPTBINDING_API`, which is not overwritten by dependency headers.
+diff --git a/toonz/sources/include/toonz/scriptbinding.h b/toonz/sources/include/toonz/scriptbinding.h
+index 56e3ed6..1b87a8d 100644
+--- a/toonz/sources/include/toonz/scriptbinding.h
++++ b/toonz/sources/include/toonz/scriptbinding.h
+@@ -23,9 +23,11 @@
+ #ifdef TOONZLIB_EXPORTS
+ #define DVAPI DV_EXPORT_API
+ #define DVVAR DV_EXPORT_VAR
++#define SCRIPTBINDING_API DV_EXPORT_API
+ #else
+ #define DVAPI DV_IMPORT_API
+ #define DVVAR DV_IMPORT_VAR
++#define SCRIPTBINDING_API DV_IMPORT_API
+ #endif
+ 
+ // Macro for standard wrapper methods
+@@ -52,13 +54,13 @@ class TFilePath;
+ 
+ namespace TScriptBinding {
+ 
+-class DVAPI Void final : public QObject {
++class SCRIPTBINDING_API Void final : public QObject {
+   Q_OBJECT
+ public:
+   WRAPPER_STD_METHODS(Void)
+ };
+ 
+-class DVAPI Wrapper : public QObject, protected QScriptable {
++class SCRIPTBINDING_API Wrapper : public QObject, protected QScriptable {
+   Q_OBJECT
+ 
+   static int m_count;
+diff --git a/toonz/sources/include/toonz/scriptbinding_audio.h b/toonz/sources/include/toonz/scriptbinding_audio.h
+index ac841c7..64307ea 100644
+--- a/toonz/sources/include/toonz/scriptbinding_audio.h
++++ b/toonz/sources/include/toonz/scriptbinding_audio.h
+@@ -6,7 +6,7 @@
+ 
+ namespace TScriptBinding {
+ 
+-class DVAPI Audio final : public Wrapper {
++class SCRIPTBINDING_API Audio final : public Wrapper {
+   Q_OBJECT
+ 
+ public:
+diff --git a/toonz/sources/include/toonz/scriptbinding_centerline_vectorizer.h b/toonz/sources/include/toonz/scriptbinding_centerline_vectorizer.h
+index ac54945..9443cd5 100644
+--- a/toonz/sources/include/toonz/scriptbinding_centerline_vectorizer.h
++++ b/toonz/sources/include/toonz/scriptbinding_centerline_vectorizer.h
+@@ -10,7 +10,7 @@ class TXshSimpleLevel;
+ 
+ namespace TScriptBinding {
+ 
+-class DVAPI CenterlineVectorizer final : public Wrapper {
++class SCRIPTBINDING_API CenterlineVectorizer final : public Wrapper {
+   Q_OBJECT
+   std::unique_ptr<CenterlineConfiguration> m_parameters;
+ 
+diff --git a/toonz/sources/include/toonz/scriptbinding_cleanupper.h b/toonz/sources/include/toonz/scriptbinding_cleanupper.h
+index 1d9a0e7..6f0dde4 100644
+--- a/toonz/sources/include/toonz/scriptbinding_cleanupper.h
++++ b/toonz/sources/include/toonz/scriptbinding_cleanupper.h
+@@ -9,7 +9,7 @@ class CleanupParameters;
+ 
+ namespace TScriptBinding {
+ 
+-class DVAPI Cleanupper final : public Wrapper {
++class SCRIPTBINDING_API Cleanupper final : public Wrapper {
+   Q_OBJECT
+   std::unique_ptr<CleanupParameters> m_params;
+ 
+diff --git a/toonz/sources/include/toonz/scriptbinding_effect.h b/toonz/sources/include/toonz/scriptbinding_effect.h
+index dfc00dd..81fe9d4 100644
+--- a/toonz/sources/include/toonz/scriptbinding_effect.h
++++ b/toonz/sources/include/toonz/scriptbinding_effect.h
+@@ -8,7 +8,7 @@
+ 
+ namespace TScriptBinding {
+ 
+-class DVAPI Effect final : public Wrapper {
++class SCRIPTBINDING_API Effect final : public Wrapper {
+   Q_OBJECT
+ 
+   TFxP m_fx;
+diff --git a/toonz/sources/include/toonz/scriptbinding_files.h b/toonz/sources/include/toonz/scriptbinding_files.h
+index d220d57..dc557af 100644
+--- a/toonz/sources/include/toonz/scriptbinding_files.h
++++ b/toonz/sources/include/toonz/scriptbinding_files.h
+@@ -10,7 +10,7 @@
+ 
+ namespace TScriptBinding {
+ 
+-class DVAPI FilePath final : public Wrapper {
++class SCRIPTBINDING_API FilePath final : public Wrapper {
+   Q_OBJECT
+   QString m_filePath;
+ 
+diff --git a/toonz/sources/include/toonz/scriptbinding_image.h b/toonz/sources/include/toonz/scriptbinding_image.h
+index 1e650c4..7130566 100644
+--- a/toonz/sources/include/toonz/scriptbinding_image.h
++++ b/toonz/sources/include/toonz/scriptbinding_image.h
+@@ -7,7 +7,7 @@
+ 
+ namespace TScriptBinding {
+ 
+-class DVAPI Image final : public Wrapper {
++class SCRIPTBINDING_API Image final : public Wrapper {
+   Q_OBJECT
+   TImageP m_img;
+ 
+diff --git a/toonz/sources/include/toonz/scriptbinding_image_builder.h b/toonz/sources/include/toonz/scriptbinding_image_builder.h
+index bfe4ed5..44a4f20 100644
+--- a/toonz/sources/include/toonz/scriptbinding_image_builder.h
++++ b/toonz/sources/include/toonz/scriptbinding_image_builder.h
+@@ -10,7 +10,7 @@ class TXshSimpleLevel;
+ 
+ namespace TScriptBinding {
+ 
+-class DVAPI Transform final : public Wrapper {
++class SCRIPTBINDING_API Transform final : public Wrapper {
+   Q_OBJECT
+   TAffine m_affine;
+ 
+@@ -31,7 +31,7 @@ public:
+   const TAffine &getAffine() const { return m_affine; }
+ };
+ 
+-class DVAPI ImageBuilder final : public Wrapper {
++class SCRIPTBINDING_API ImageBuilder final : public Wrapper {
+   Q_OBJECT
+   TImageP m_img;
+   int m_width, m_height;
+diff --git a/toonz/sources/include/toonz/scriptbinding_inbetween.h b/toonz/sources/include/toonz/scriptbinding_inbetween.h
+index 4a3a3d5..1ab7d91 100644
+--- a/toonz/sources/include/toonz/scriptbinding_inbetween.h
++++ b/toonz/sources/include/toonz/scriptbinding_inbetween.h
+@@ -9,7 +9,7 @@
+ 
+ namespace TScriptBinding {
+ 
+-class DVAPI Inbetween final : public Wrapper {
++class SCRIPTBINDING_API Inbetween final : public Wrapper {
+   Q_OBJECT
+ 
+   TVectorImageP m_firstImage;
 diff --git a/toonz/sources/include/toonz/scriptbinding_level.h b/toonz/sources/include/toonz/scriptbinding_level.h
-index 0deda17..e34ee2e 100644
+index 0deda17..5b0ebfe 100644
 --- a/toonz/sources/include/toonz/scriptbinding_level.h
 +++ b/toonz/sources/include/toonz/scriptbinding_level.h
+@@ -13,7 +13,7 @@ class TFrameId;
+ 
+ namespace TScriptBinding {
+ 
+-class DVAPI Level final : public Wrapper {
++class SCRIPTBINDING_API Level final : public Wrapper {
+   Q_OBJECT
+ 
+   TXshSimpleLevel *m_sl;
 @@ -50,6 +50,15 @@ public:
    Q_INVOKABLE QScriptValue setFrame(const QScriptValue &fid,
                                      const QScriptValue &image);
@@ -80,10 +239,45 @@ index 0deda17..e34ee2e 100644
    // Level operations
    Q_INVOKABLE QScriptValue getFrameIds();
    Q_INVOKABLE QScriptValue load(const QScriptValue &fp);
+diff --git a/toonz/sources/include/toonz/scriptbinding_outline_vectorizer.h b/toonz/sources/include/toonz/scriptbinding_outline_vectorizer.h
+index 8ebf0b6..3d8ddf2 100644
+--- a/toonz/sources/include/toonz/scriptbinding_outline_vectorizer.h
++++ b/toonz/sources/include/toonz/scriptbinding_outline_vectorizer.h
+@@ -10,7 +10,7 @@ class TXshSimpleLevel;
+ 
+ namespace TScriptBinding {
+ 
+-class DVAPI OutlineVectorizer final : public Wrapper {
++class SCRIPTBINDING_API OutlineVectorizer final : public Wrapper {
+   Q_OBJECT
+   std::unique_ptr<NewOutlineConfiguration> m_parameters;
+ 
+diff --git a/toonz/sources/include/toonz/scriptbinding_palette.h b/toonz/sources/include/toonz/scriptbinding_palette.h
+index 865a131..d312bad 100644
+--- a/toonz/sources/include/toonz/scriptbinding_palette.h
++++ b/toonz/sources/include/toonz/scriptbinding_palette.h
+@@ -8,7 +8,7 @@
+ 
+ namespace TScriptBinding {
+ 
+-class DVAPI Palette final : public Wrapper {
++class SCRIPTBINDING_API Palette final : public Wrapper {
+   Q_OBJECT
+ 
+   TPalette *m_palette;
 diff --git a/toonz/sources/include/toonz/scriptbinding_plasticrig.h b/toonz/sources/include/toonz/scriptbinding_plasticrig.h
-index eb53ff1..5512874 100644
+index eb53ff1..9fb1256 100644
 --- a/toonz/sources/include/toonz/scriptbinding_plasticrig.h
 +++ b/toonz/sources/include/toonz/scriptbinding_plasticrig.h
+@@ -11,7 +11,7 @@ class PlasticSkeletonDeformation;
+ 
+ namespace TScriptBinding {
+ 
+-class DVAPI PlasticRig final : public Wrapper {
++class SCRIPTBINDING_API PlasticRig final : public Wrapper {
+   Q_OBJECT
+ 
+   PlasticSkeleton *m_skeleton;
 @@ -29,6 +29,10 @@ public:
    Q_INVOKABLE QScriptValue moveVertex(int vertexIdx, double x, double y);
    Q_INVOKABLE QScriptValue removeVertex(int vertexIdx);
@@ -95,10 +289,58 @@ index eb53ff1..5512874 100644
  
    // Keyframing deformation
    Q_INVOKABLE QScriptValue setVertexKeyframe(int vertexIdx, double frame,
+diff --git a/toonz/sources/include/toonz/scriptbinding_rastercanvas.h b/toonz/sources/include/toonz/scriptbinding_rastercanvas.h
+index 96964ac..fe1e11f 100644
+--- a/toonz/sources/include/toonz/scriptbinding_rastercanvas.h
++++ b/toonz/sources/include/toonz/scriptbinding_rastercanvas.h
+@@ -13,7 +13,7 @@ namespace TScriptBinding {
+ 
+ class Palette;
+ 
+-class DVAPI RasterCanvas final : public Wrapper {
++class SCRIPTBINDING_API RasterCanvas final : public Wrapper {
+   Q_OBJECT
+ 
+   TRasterCM32P m_raster;
+diff --git a/toonz/sources/include/toonz/scriptbinding_rasterizer.h b/toonz/sources/include/toonz/scriptbinding_rasterizer.h
+index 23d5912..1f99eef 100644
+--- a/toonz/sources/include/toonz/scriptbinding_rasterizer.h
++++ b/toonz/sources/include/toonz/scriptbinding_rasterizer.h
+@@ -10,7 +10,7 @@ class TXshSimpleLevel;
+ 
+ namespace TScriptBinding {
+ 
+-class DVAPI Rasterizer final : public Wrapper {
++class SCRIPTBINDING_API Rasterizer final : public Wrapper {
+   Q_OBJECT
+   bool m_colorMapped;
+   int m_xres, m_yres;
+diff --git a/toonz/sources/include/toonz/scriptbinding_renderer.h b/toonz/sources/include/toonz/scriptbinding_renderer.h
+index 0c431a8..b7aa259 100644
+--- a/toonz/sources/include/toonz/scriptbinding_renderer.h
++++ b/toonz/sources/include/toonz/scriptbinding_renderer.h
+@@ -7,7 +7,7 @@
+ 
+ namespace TScriptBinding {
+ 
+-class DVAPI Renderer final : public Wrapper {
++class SCRIPTBINDING_API Renderer final : public Wrapper {
+   Q_OBJECT
+   class Imp;
+   Imp *m_imp;
 diff --git a/toonz/sources/include/toonz/scriptbinding_scene.h b/toonz/sources/include/toonz/scriptbinding_scene.h
-index 997c2b5..b9bf652 100644
+index 997c2b5..c7a1b85 100644
 --- a/toonz/sources/include/toonz/scriptbinding_scene.h
 +++ b/toonz/sources/include/toonz/scriptbinding_scene.h
+@@ -7,7 +7,7 @@
+ 
+ namespace TScriptBinding {
+ 
+-class DVAPI Scene final : public Wrapper {
++class SCRIPTBINDING_API Scene final : public Wrapper {
+   Q_OBJECT
+   ToonzScene *m_scene;
+ 
 @@ -73,9 +73,15 @@ public:
    // Export
    Q_INVOKABLE QScriptValue exportResources(const QString &destDir);
@@ -116,6 +358,71 @@ index 997c2b5..b9bf652 100644
  
    // Motion path splines
    Q_INVOKABLE QScriptValue createSpline(const QScriptValue &pointArray);
+diff --git a/toonz/sources/include/toonz/scriptbinding_stageobject.h b/toonz/sources/include/toonz/scriptbinding_stageobject.h
+index 1865c35..11290da 100644
+--- a/toonz/sources/include/toonz/scriptbinding_stageobject.h
++++ b/toonz/sources/include/toonz/scriptbinding_stageobject.h
+@@ -8,7 +8,7 @@
+ 
+ namespace TScriptBinding {
+ 
+-class DVAPI StageObject final : public Wrapper {
++class SCRIPTBINDING_API StageObject final : public Wrapper {
+   Q_OBJECT
+ 
+   TStageObject *m_obj;           // Not owned — belongs to TXsheet's stage object tree
+diff --git a/toonz/sources/include/toonz/scriptbinding_stroke.h b/toonz/sources/include/toonz/scriptbinding_stroke.h
+index d6861d5..8feffe3 100644
+--- a/toonz/sources/include/toonz/scriptbinding_stroke.h
++++ b/toonz/sources/include/toonz/scriptbinding_stroke.h
+@@ -8,7 +8,7 @@
+ 
+ namespace TScriptBinding {
+ 
+-class DVAPI Stroke final : public Wrapper {
++class SCRIPTBINDING_API Stroke final : public Wrapper {
+   Q_OBJECT
+ 
+   std::vector<TThickPoint> m_points;
+diff --git a/toonz/sources/include/toonz/scriptbinding_toonz_raster_converter.h b/toonz/sources/include/toonz/scriptbinding_toonz_raster_converter.h
+index 07e8399..2e2e224 100644
+--- a/toonz/sources/include/toonz/scriptbinding_toonz_raster_converter.h
++++ b/toonz/sources/include/toonz/scriptbinding_toonz_raster_converter.h
+@@ -10,7 +10,7 @@ class TXshSimpleLevel;
+ 
+ namespace TScriptBinding {
+ 
+-class DVAPI ToonzRasterConverter final : public Wrapper {
++class SCRIPTBINDING_API ToonzRasterConverter final : public Wrapper {
+   Q_OBJECT
+   bool m_flatSource;
+ 
+diff --git a/toonz/sources/include/toonz/scriptbinding_tracker.h b/toonz/sources/include/toonz/scriptbinding_tracker.h
+index 2354297..f6c938c 100644
+--- a/toonz/sources/include/toonz/scriptbinding_tracker.h
++++ b/toonz/sources/include/toonz/scriptbinding_tracker.h
+@@ -6,7 +6,7 @@
+ 
+ namespace TScriptBinding {
+ 
+-class DVAPI Tracker final : public Wrapper {
++class SCRIPTBINDING_API Tracker final : public Wrapper {
+   Q_OBJECT
+ 
+   class Imp;
+diff --git a/toonz/sources/include/toonz/scriptbinding_vectorimage.h b/toonz/sources/include/toonz/scriptbinding_vectorimage.h
+index 2746bcb..c9eb70f 100644
+--- a/toonz/sources/include/toonz/scriptbinding_vectorimage.h
++++ b/toonz/sources/include/toonz/scriptbinding_vectorimage.h
+@@ -11,7 +11,7 @@ namespace TScriptBinding {
+ class Stroke;
+ class Image;
+ 
+-class DVAPI VectorImage final : public Wrapper {
++class SCRIPTBINDING_API VectorImage final : public Wrapper {
+   Q_OBJECT
+ 
+   TVectorImageP m_vi;
 diff --git a/toonz/sources/toonz_headless/CMakeLists.txt b/toonz/sources/toonz_headless/CMakeLists.txt
 index d07095a..d699d77 100644
 --- a/toonz/sources/toonz_headless/CMakeLists.txt
@@ -158,6 +465,28 @@ index d58f77e..7a4f6b0 100644
  #include "tsystem.h"
  #include "tthread.h"
  #include "tenv.h"
+diff --git a/toonz/sources/toonzlib/CMakeLists.txt b/toonz/sources/toonzlib/CMakeLists.txt
+index 41344d7..4b0e1e8 100644
+--- a/toonz/sources/toonzlib/CMakeLists.txt
++++ b/toonz/sources/toonzlib/CMakeLists.txt
+@@ -366,15 +366,13 @@ endif()
+ qt5_wrap_cpp(SOURCES ${MOC_HEADERS})
+ 
+ add_library(toonzlib SHARED ${HEADERS} ${SOURCES})
++# Ensure generated Qt meta-object translation units export this DLL's classes.
++target_compile_definitions(toonzlib PRIVATE TOONZLIB_EXPORTS)
+ if(BUILD_ENV_APPLE)
+     set(CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -Wl,-install_name,@executable_path/libtoonzlib.dylib")
+     add_dependencies(toonzlib tnzcore tnzbase tnzext)
+ endif()
+ 
+-add_definitions(
+-    -DTOONZLIB_EXPORTS
+-)
+-
+ message("subdir: toonzlib")
+ message("Bin: " ${CMAKE_CURRENT_BINARY_DIR})
+ 
 diff --git a/toonz/sources/toonzlib/scriptbinding_level.cpp b/toonz/sources/toonzlib/scriptbinding_level.cpp
 index 171cd87..1cb0565 100644
 --- a/toonz/sources/toonzlib/scriptbinding_level.cpp
